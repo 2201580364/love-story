@@ -1,45 +1,61 @@
 """Heart shape geometry utilities.
 
-Provides parametric heart outline generation, polygon point-in-polygon
-testing, and filled heart scatter-point generation (standard and v2 with
-depth-weight per point).
+Provides outline polygon generation, point-in-polygon testing,
+and filled heart scatter point generation.
 """
 
 import math
 import random
-import warnings
 
 # ---------------------------------------------------------------------------
-# Module-level constants (shared by filled_heart_points and filled_heart_points_v2)
+# Heart parametric equation constants
 # ---------------------------------------------------------------------------
+_HEART_A: float = 16.0   # x amplitude coefficient
+_HEART_B: float = 13.0   # primary y cosine coefficient
+_HEART_C1: float = 5.0   # second harmonic y coefficient
+_HEART_C2: float = 2.0   # third harmonic y coefficient
+_HEART_C3: float = 1.0   # fourth harmonic y coefficient
+_HEART_C4: float = 4.0   # fourth harmonic multiplier
 
+# Bounding box for rejection sampling (in normalised heart coords)
+_SAMPLE_X_MIN: float = -16.0
+_SAMPLE_X_MAX: float = 16.0
+_SAMPLE_Y_MIN: float = -17.0
+_SAMPLE_Y_MAX: float = 13.0
+
+# Safety multiplier for max rejection-sampling attempts relative to density
+_MAX_ATTEMPTS_FACTOR: int = 50
+
+# Outline polygon resolution used internally for filled-point generation
 _OUTLINE_RESOLUTION: int = 300
-_HEART_X_MIN: float = -16.0
-_HEART_X_MAX: float = 16.0
-_HEART_Y_MIN: float = -17.0
-_HEART_Y_MAX: float = 13.0
-_MAX_ATTEMPTS_MULTIPLIER: int = 50
+
+# Two-pi constant
+_TWO_PI: float = 2.0 * math.pi
 
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
 
-
 def _heart_outline_polygon(num_points: int = 200) -> list[tuple[float, float]]:
     """Generate normalized heart outline polygon (no offset, no scaling).
 
     Args:
-        num_points: Number of vertices in the polygon.
+        num_points: Number of vertices in the outline polygon.
 
     Returns:
         List of (x, y) tuples in normalised heart coordinates.
     """
     polygon = []
     for i in range(num_points):
-        t = 2 * math.pi * i / num_points
-        x = 16 * math.sin(t) ** 3
-        y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+        t = _TWO_PI * i / num_points
+        x = _HEART_A * math.sin(t) ** 3
+        y = (
+            _HEART_B * math.cos(t)
+            - _HEART_C1 * math.cos(2 * t)
+            - _HEART_C2 * math.cos(3 * t)
+            - _HEART_C3 * math.cos(_HEART_C4 * t)
+        )
         polygon.append((x, y))
     return polygon
 
@@ -48,12 +64,18 @@ def _point_in_polygon(px: float, py: float, polygon: list[tuple[float, float]]) 
     """Ray casting algorithm to test if point (px, py) is inside polygon.
 
     Args:
-        px: X coordinate of the test point.
-        py: Y coordinate of the test point.
-        polygon: List of (x, y) vertices.
+        px: X coordinate of the point to test.
+        py: Y coordinate of the point to test.
+        polygon: List of (x, y) vertices defining the polygon boundary.
 
     Returns:
-        True if (px, py) is inside *polygon*, False otherwise.
+        True if the point is inside the polygon, False otherwise.
+
+    Note:
+        Points that lie exactly on a polygon edge have undefined behavior
+        (may return True or False).  This implementation is intended for
+        Monte Carlo sampling and is not suitable for exact boundary
+        classification.
     """
     n = len(polygon)
     inside = False
@@ -68,9 +90,8 @@ def _point_in_polygon(px: float, py: float, polygon: list[tuple[float, float]]) 
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Public functions
 # ---------------------------------------------------------------------------
-
 
 def heart_points(
     cx: float,
@@ -83,8 +104,8 @@ def heart_points(
     Args:
         cx: X coordinate of the center offset.
         cy: Y coordinate of the center offset.
-        size: Scale factor for the heart.
-        num_points: Number of outline points to generate.
+        size: Scale factor for the heart. Must be > 0.
+        num_points: Number of outline points to generate. Must be > 0.
 
     Returns:
         List of (x, y) tuples representing the heart outline.
@@ -93,15 +114,20 @@ def heart_points(
         ValueError: If size <= 0 or num_points <= 0.
     """
     if size <= 0:
-        raise ValueError('size must be > 0')
+        raise ValueError("size must be > 0")
     if num_points <= 0:
-        raise ValueError('num_points must be > 0')
+        raise ValueError("num_points must be > 0")
 
-    points: list[tuple[float, float]] = []
+    points = []
     for i in range(num_points):
-        t = 2 * math.pi * i / num_points
-        x = 16 * math.sin(t) ** 3
-        y = 13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t) - math.cos(4 * t)
+        t = _TWO_PI * i / num_points
+        x = _HEART_A * math.sin(t) ** 3
+        y = (
+            _HEART_B * math.cos(t)
+            - _HEART_C1 * math.cos(2 * t)
+            - _HEART_C2 * math.cos(3 * t)
+            - _HEART_C3 * math.cos(_HEART_C4 * t)
+        )
         points.append((cx + x * size, cy - y * size))
     return points
 
@@ -117,8 +143,8 @@ def filled_heart_points(
     Args:
         cx: X coordinate of the center offset.
         cy: Y coordinate of the center offset.
-        size: Scale factor for the heart.
-        density: Number of fill points to generate.
+        size: Scale factor for the heart. Must be > 0.
+        density: Number of fill points to generate. Must be > 0.
 
     Returns:
         List of (x, y) tuples representing the filled heart scatter points.
@@ -127,19 +153,19 @@ def filled_heart_points(
         ValueError: If size <= 0 or density <= 0.
     """
     if size <= 0:
-        raise ValueError('size must be > 0')
+        raise ValueError("size must be > 0")
     if density <= 0:
-        raise ValueError('density must be > 0')
+        raise ValueError("density must be > 0")
 
     outline_polygon = _heart_outline_polygon(_OUTLINE_RESOLUTION)
-    points: list[tuple[float, float]] = []
-    max_attempts = density * _MAX_ATTEMPTS_MULTIPLIER
+    points = []
+    max_attempts = density * _MAX_ATTEMPTS_FACTOR
     attempts = 0
 
     while len(points) < density and attempts < max_attempts:
         attempts += 1
-        x0 = random.uniform(_HEART_X_MIN, _HEART_X_MAX)
-        y0 = random.uniform(_HEART_Y_MIN, _HEART_Y_MAX)
+        x0 = random.uniform(_SAMPLE_X_MIN, _SAMPLE_X_MAX)
+        y0 = random.uniform(_SAMPLE_Y_MIN, _SAMPLE_Y_MAX)
         if _point_in_polygon(x0, y0, outline_polygon):
             points.append((cx + x0 * size, cy - y0 * size))
 
@@ -151,66 +177,61 @@ def filled_heart_points_v2(
     cy: float,
     size: float,
     density: int = 1200,
+    rng: random.Random | None = None,
 ) -> list[tuple[float, float, float]]:
-    """Return filled heart scatter points, each with a random depth weight.
+    """Return filled heart scatter points with per-point depth weight.
 
-    Each returned point is a 3-tuple (x, y, w) where *w* ∈ [0, 1] is a
-    random depth weight used for colour layering: higher *w* values map to
-    brighter / lighter pink shades.
+    Each returned point carries a random depth weight *w* in [0.0, 1.0]
+    suitable for colour layering: higher *w* → brighter / more saturated
+    appearance in the rendering layer.
 
     Args:
-        cx: X coordinate of the center offset.
-        cy: Y coordinate of the center offset.
-        size: Scale factor for the heart (must be > 0).
-        density: Target number of fill points to generate (must be > 0,
-                 not bool).
+        cx: X coordinate of the centre of the heart.
+        cy: Y coordinate of the centre of the heart.
+        size: Scale factor for the heart. Must be > 0.
+        density: Target number of fill points to generate. Must be > 0.
+        rng: Optional ``random.Random`` instance to use for sampling.
+            If None, the module-level random state is used.
 
     Returns:
-        List of (x, y, w) tuples where x, y are canvas coordinates and
-        w ∈ [0.0, 1.0] is the depth weight.
+        List of ``(x, y, w)`` tuples where *x*, *y* are canvas coordinates
+        and *w* ∈ [0.0, 1.0] is the depth weight.
 
     Raises:
-        TypeError: If *density* is a bool.
-        ValueError: If *size* <= 0 or *density* <= 0.
+        ValueError: If size <= 0 or density <= 0.
+        TypeError: If rng is provided but is not a ``random.Random`` instance.
 
-    Warns:
-        RuntimeWarning: If fewer than *density* points could be generated
-                        within the maximum number of attempts (e.g. when
-                        *size* is very small or *density* is very large).
+    Note:
+        This function is not thread-safe when *rng* is None, because it falls
+        back to the module-level random state which is shared across threads.
+        For concurrent use, create and pass a dedicated instance::
+
+            local_rng = random.Random()
+            pts = filled_heart_points_v2(cx, cy, size, rng=local_rng)
     """
-    if isinstance(density, bool):
-        raise TypeError(
-            f'density must be int (not bool), got {type(density).__name__!r}'
-        )
-    if not isinstance(density, int):
-        raise TypeError(
-            f'density must be int, got {type(density).__name__!r}'
-        )
     if size <= 0:
         raise ValueError(f'size must be > 0, got {size!r}')
     if density <= 0:
         raise ValueError(f'density must be > 0, got {density!r}')
+    if rng is not None and not isinstance(rng, random.Random):
+        raise TypeError(
+            f'rng must be a random.Random instance or None, '
+            f'got {type(rng).__name__}: {rng!r}'
+        )
+
+    _rng = rng if rng is not None else random
 
     outline_polygon = _heart_outline_polygon(_OUTLINE_RESOLUTION)
     points: list[tuple[float, float, float]] = []
-    max_attempts = density * _MAX_ATTEMPTS_MULTIPLIER
+    max_attempts = density * _MAX_ATTEMPTS_FACTOR
     attempts = 0
 
     while len(points) < density and attempts < max_attempts:
         attempts += 1
-        x0 = random.uniform(_HEART_X_MIN, _HEART_X_MAX)
-        y0 = random.uniform(_HEART_Y_MIN, _HEART_Y_MAX)
+        x0 = _rng.uniform(_SAMPLE_X_MIN, _SAMPLE_X_MAX)
+        y0 = _rng.uniform(_SAMPLE_Y_MIN, _SAMPLE_Y_MAX)
         if _point_in_polygon(x0, y0, outline_polygon):
-            w = random.random()  # depth weight ∈ [0, 1]
+            w = _rng.random()
             points.append((cx + x0 * size, cy - y0 * size, w))
-
-    if len(points) < density:
-        warnings.warn(
-            f'filled_heart_points_v2: generated {len(points)}/{density} points '
-            f'after {max_attempts} attempts. '
-            f'Consider reducing density or increasing size.',
-            RuntimeWarning,
-            stacklevel=2,
-        )
 
     return points
