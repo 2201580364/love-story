@@ -1,180 +1,251 @@
-"""Visual enhancement utility module for heart animation.
+"""Visual enhancement utilities for the heart animation.
 
-Provides easing functions, multi-color gradient interpolation,
-particle size pulsation, glow color overlay, beat scaling, and
-other pure functions for visual effects.
+Provides easing functions, multi-stop color interpolation, particle size
+pulsation, glow color blending, beat scaling, and re-exports
+filled_heart_points_v2 from heart.py so that downstream modules can import
+everything from a single namespace.
+
+All functions are pure (no side-effects, no global mutable state).
 """
 
 import math
+import re
+
+# ---------------------------------------------------------------------------
+# Re-export from heart module so callers can do: from effects import ...
+# ---------------------------------------------------------------------------
+from heart import filled_heart_points_v2 as filled_heart_points_v2  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-# Default rich color palette: deep red -> rose red -> pink -> light pink
+# Canvas layer tag constants – all modules must import from here to stay in sync.
+HEART_TAG: str = 'heart_layer'
+TEXT_TAG: str = 'text_layer'
+
+# Default rich colour palette: dark-red → rose-red → pink → light-pink
 DEFAULT_PALETTE: list[tuple[int, int, int]] = [
-    (180, 0, 0),      # deep red
-    (220, 20, 60),    # rose red (crimson)
-    (255, 105, 147),  # pink (hot pink)
+    (139, 0, 0),    # dark red
+    (220, 20, 60),  # crimson / rose-red
+    (255, 105, 180),  # hot pink
     (255, 182, 193),  # light pink
 ]
 
-# Clamp bounds for easing input
+# Compiled regex for hex colour validation
+_HEX_COLOR_RE: re.Pattern[str] = re.compile(r'^#[0-9a-fA-F]{6}$')
+
+# Clamp boundaries for normalised time parameter
 _T_MIN: float = 0.0
 _T_MAX: float = 1.0
 
-# Math constant
-_TWO_PI: float = 2.0 * math.pi
-_HALF_PI: float = math.pi / 2.0
+# ---------------------------------------------------------------------------
+# Internal helper validators
+# ---------------------------------------------------------------------------
 
-# Color channel bounds
-_CHANNEL_MIN: int = 0
-_CHANNEL_MAX: int = 255
+
+def _require_finite(val: float, name: str) -> None:
+    """Raise ValueError if *val* is not a finite real number (NaN or Inf).
+
+    Args:
+        val: The value to check.
+        name: Parameter name used in the error message.
+
+    Raises:
+        ValueError: If *val* is NaN or infinite.
+    """
+    if not math.isfinite(val):
+        raise ValueError(f'{name} must be a finite number, got {val!r}')
+
+
+def _require_int(val: object, name: str) -> None:
+    """Raise TypeError if *val* is not a plain int (bool is rejected).
+
+    Args:
+        val: The value to check.
+        name: Parameter name used in the error message.
+
+    Raises:
+        TypeError: If *val* is not an int, or is a bool.
+    """
+    if not isinstance(val, int) or isinstance(val, bool):
+        raise TypeError(
+            f'{name} must be int (not bool or other type), '
+            f'got {type(val).__name__!r}'
+        )
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """Return *value* clamped to the closed interval [lo, hi].
+
+    Args:
+        value: The value to clamp.
+        lo: Lower bound.
+        hi: Upper bound.
+
+    Returns:
+        Clamped float value.
+    """
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
+
+
+def _clamp_channel(channel: float) -> int:
+    """Clamp a colour channel to [0, 255] and return as int.
+
+    Args:
+        channel: Raw channel value (may be fractional).
+
+    Returns:
+        Integer channel value in [0, 255].
+    """
+    return int(_clamp(channel, 0.0, 255.0))
 
 
 # ---------------------------------------------------------------------------
 # Easing functions
 # ---------------------------------------------------------------------------
 
+
 def easing_out_cubic(t: float) -> float:
-    """Cubic ease-out function: decelerates from fast to slow.
+    """Cubic ease-out: fast start, slow finish.
 
     Args:
-        t: Normalized time value, clamped internally to [0.0, 1.0].
+        t: Normalised time in [0.0, 1.0].  Values outside this range are
+           clamped.  NaN / Inf are rejected.
 
     Returns:
-        Eased float value in [0.0, 1.0].
+        Eased value in [0.0, 1.0].
 
     Raises:
-        TypeError: If t is not a numeric type.
+        ValueError: If *t* is NaN or infinite.
     """
-    if not isinstance(t, (int, float)):
-        raise TypeError(f"t must be a numeric type, got {type(t).__name__}")
-    t_clamped = max(_T_MIN, min(_T_MAX, float(t)))
-    return 1.0 - (1.0 - t_clamped) ** 3
+    _require_finite(t, 't')
+    t = _clamp(t, _T_MIN, _T_MAX)
+    return 1.0 - (1.0 - t) ** 3
 
 
 def easing_in_out_sine(t: float) -> float:
-    """Sine ease-in-out function: smooth acceleration and deceleration.
+    """Sine ease-in-out: smooth acceleration and deceleration.
 
     Args:
-        t: Normalized time value, clamped internally to [0.0, 1.0].
+        t: Normalised time in [0.0, 1.0].  Values outside this range are
+           clamped.  NaN / Inf are rejected.
 
     Returns:
-        Eased float value in [0.0, 1.0].
+        Eased value in [0.0, 1.0].
 
     Raises:
-        TypeError: If t is not a numeric type.
+        ValueError: If *t* is NaN or infinite.
     """
-    if not isinstance(t, (int, float)):
-        raise TypeError(f"t must be a numeric type, got {type(t).__name__}")
-    t_clamped = max(_T_MIN, min(_T_MAX, float(t)))
-    return -(math.cos(math.pi * t_clamped) - 1.0) / 2.0
+    _require_finite(t, 't')
+    t = _clamp(t, _T_MIN, _T_MAX)
+    return -(math.cos(math.pi * t) - 1.0) / 2.0
 
 
 # ---------------------------------------------------------------------------
-# Color utilities
+# Colour utilities
 # ---------------------------------------------------------------------------
-
-def _clamp_channel(value: float) -> int:
-    """Clamp a color channel value to [0, 255] and convert to int.
-
-    Args:
-        value: Raw channel value (float).
-
-    Returns:
-        Integer in [0, 255].
-    """
-    return max(_CHANNEL_MIN, min(_CHANNEL_MAX, round(value)))
 
 
 def lerp_color_rich(
     t: float,
     palette: list[tuple[int, int, int]],
 ) -> str:
-    """Interpolate through a multi-stop color palette.
+    """Interpolate a colour from a multi-stop palette.
 
-    Linearly maps t in [0, 1] across the palette stops.
-    For example, with 4 stops, t=0 -> stop[0], t=1/3 -> stop[1], etc.
+    The palette stops are distributed evenly across [0, 1].  *t* is clamped
+    to [0, 1] before interpolation.
 
     Args:
-        t: Normalized position in [0.0, 1.0], clamped internally.
-        palette: List of at least 2 RGB tuples (r, g, b) each in [0, 255].
+        t: Normalised position in [0.0, 1.0].
+        palette: List of at least 2 RGB tuples, each channel in [0, 255].
 
     Returns:
-        Hex color string in '#rrggbb' format.
+        Hex colour string in '#rrggbb' format.
 
     Raises:
-        TypeError: If t is not numeric or palette entries are invalid.
-        ValueError: If palette has fewer than 2 entries.
+        ValueError: If *t* is NaN / Inf, or palette has fewer than 2 stops,
+                    or any channel value is outside [0, 255].
+        TypeError: If palette elements are not 3-tuples of int.
     """
-    if not isinstance(t, (int, float)):
-        raise TypeError(f"t must be a numeric type, got {type(t).__name__}")
+    _require_finite(t, 't')
     if not isinstance(palette, list) or len(palette) < 2:
-        raise ValueError("palette must be a list with at least 2 color stops")
+        raise ValueError(
+            f'palette must be a list of at least 2 colour stops, '
+            f'got {len(palette) if isinstance(palette, list) else type(palette).__name__!r}'
+        )
     for i, stop in enumerate(palette):
         if not (isinstance(stop, tuple) and len(stop) == 3):
-            raise TypeError(f"palette[{i}] must be a tuple of 3 ints, got {stop!r}")
+            raise TypeError(
+                f'palette[{i}] must be a 3-tuple of int, got {stop!r}'
+            )
+        r, g, b = stop
+        if not all(isinstance(c, int) and 0 <= c <= 255 for c in (r, g, b)):
+            raise ValueError(
+                f'palette[{i}] channels must be int in [0, 255], got {stop!r}'
+            )
 
-    t_clamped = max(_T_MIN, min(_T_MAX, float(t)))
+    t = _clamp(t, _T_MIN, _T_MAX)
     num_segments = len(palette) - 1
-    # Determine which segment we are in
-    segment_index = min(int(t_clamped * num_segments), num_segments - 1)
-    segment_t = t_clamped * num_segments - segment_index
+    # Map t to segment index and local position
+    scaled = t * num_segments
+    idx = int(scaled)
+    if idx >= num_segments:
+        idx = num_segments - 1
+    local_t = scaled - idx
 
-    r0, g0, b0 = palette[segment_index]
-    r1, g1, b1 = palette[segment_index + 1]
+    r0, g0, b0 = palette[idx]
+    r1, g1, b1 = palette[idx + 1]
 
-    r = _clamp_channel(r0 + (r1 - r0) * segment_t)
-    g = _clamp_channel(g0 + (g1 - g0) * segment_t)
-    b = _clamp_channel(b0 + (b1 - b0) * segment_t)
-
-    return f"#{r:02x}{g:02x}{b:02x}"
+    r = _clamp_channel(r0 + (r1 - r0) * local_t)
+    g = _clamp_channel(g0 + (g1 - g0) * local_t)
+    b = _clamp_channel(b0 + (b1 - b0) * local_t)
+    return f'#{r:02x}{g:02x}{b:02x}'
 
 
 def glow_color(base_color: str, intensity: float) -> str:
-    """Blend a base color toward white by an intensity factor.
+    """Blend *base_color* towards white by *intensity* to simulate a glow.
 
     Args:
-        base_color: Hex color string in '#rrggbb' format.
-        intensity: Blend factor in [0.0, 1.0]; 0 = original, 1 = white.
-                   Clamped internally.
+        base_color: Hex colour string in '#rrggbb' format (case-insensitive).
+        intensity: Blend factor towards white in [0.0, 1.0].
+                   0.0 → original colour, 1.0 → white (#ffffff).
+                   Values are clamped to [0, 1].  NaN / Inf are rejected.
 
     Returns:
-        Hex color string in '#rrggbb' format.
+        Hex colour string in '#rrggbb' format.
 
     Raises:
-        TypeError: If intensity is not numeric.
-        ValueError: If base_color is not a valid '#rrggbb' string.
+        ValueError: If *base_color* is not a valid hex colour string, or
+                    *intensity* is NaN / Inf.
     """
-    if not isinstance(intensity, (int, float)):
-        raise TypeError(f"intensity must be a numeric type, got {type(intensity).__name__}")
-    if not isinstance(base_color, str) or len(base_color) != 7 or base_color[0] != '#':
+    if not isinstance(base_color, str) or not _HEX_COLOR_RE.match(base_color):
         raise ValueError(
-            f"base_color must be a '#rrggbb' hex string, got {base_color!r}"
+            f'base_color must be a valid hex colour string like #rrggbb, '
+            f'got {base_color!r}'
         )
-    try:
-        r0 = int(base_color[1:3], 16)
-        g0 = int(base_color[3:5], 16)
-        b0 = int(base_color[5:7], 16)
-    except ValueError as exc:
-        raise ValueError(
-            f"base_color contains invalid hex digits: {base_color!r}"
-        ) from exc
+    _require_finite(intensity, 'intensity')
+    intensity = _clamp(intensity, _T_MIN, _T_MAX)
 
-    intensity_clamped = max(_T_MIN, min(_T_MAX, float(intensity)))
-    white = _CHANNEL_MAX
+    hex_body = base_color.lstrip('#')
+    r = int(hex_body[0:2], 16)
+    g = int(hex_body[2:4], 16)
+    b = int(hex_body[4:6], 16)
 
-    r = _clamp_channel(r0 + (white - r0) * intensity_clamped)
-    g = _clamp_channel(g0 + (white - g0) * intensity_clamped)
-    b = _clamp_channel(b0 + (white - b0) * intensity_clamped)
-
-    return f"#{r:02x}{g:02x}{b:02x}"
+    r = _clamp_channel(r + (255 - r) * intensity)
+    g = _clamp_channel(g + (255 - g) * intensity)
+    b = _clamp_channel(b + (255 - b) * intensity)
+    return f'#{r:02x}{g:02x}{b:02x}'
 
 
 # ---------------------------------------------------------------------------
-# Particle / beat utilities
+# Animation helpers
 # ---------------------------------------------------------------------------
+
 
 def particle_size(
     base_r: float,
@@ -182,40 +253,38 @@ def particle_size(
     beat_period: int,
     beat_amp: float,
 ) -> float:
-    """Calculate pulsating particle radius driven by a beat cycle.
+    """Compute the pulsating radius of a particle for the given frame.
 
     Args:
-        base_r: Base radius in pixels (must be > 0).
-        frame: Current animation frame (non-negative integer).
-        beat_period: Number of frames per beat cycle (must be > 0).
-        beat_amp: Amplitude of radius oscillation in pixels (>= 0).
+        base_r: Base radius in pixels (> 0).
+        frame: Current animation frame (>= 0, not bool).
+        beat_period: Number of frames per heartbeat cycle (> 0, not bool).
+        beat_amp: Amplitude of size pulsation in pixels (>= 0).
 
     Returns:
         Computed radius as float (>= 0).
 
     Raises:
-        ValueError: If base_r <= 0 or beat_period <= 0 or beat_amp < 0.
-        TypeError: If arguments are of incorrect types.
+        TypeError: If *frame* or *beat_period* are bool or non-int.
+        ValueError: If any float argument is NaN / Inf, or *base_r* <= 0,
+                    or *beat_period* <= 0, or *beat_amp* < 0.
     """
-    if not isinstance(base_r, (int, float)):
-        raise TypeError(f"base_r must be numeric, got {type(base_r).__name__}")
-    if not isinstance(frame, int):
-        raise TypeError(f"frame must be int, got {type(frame).__name__}")
-    if not isinstance(beat_period, int):
-        raise TypeError(f"beat_period must be int, got {type(beat_period).__name__}")
-    if not isinstance(beat_amp, (int, float)):
-        raise TypeError(f"beat_amp must be numeric, got {type(beat_amp).__name__}")
+    _require_int(frame, 'frame')
+    _require_int(beat_period, 'beat_period')
+    _require_finite(base_r, 'base_r')
+    _require_finite(beat_amp, 'beat_amp')
     if base_r <= 0:
-        raise ValueError(f"base_r must be > 0, got {base_r}")
+        raise ValueError(f'base_r must be > 0, got {base_r!r}')
     if beat_period <= 0:
-        raise ValueError(f"beat_period must be > 0, got {beat_period}")
+        raise ValueError(f'beat_period must be > 0, got {beat_period!r}')
     if beat_amp < 0:
-        raise ValueError(f"beat_amp must be >= 0, got {beat_amp}")
+        raise ValueError(f'beat_amp must be >= 0, got {beat_amp!r}')
     if frame < 0:
-        raise ValueError(f"frame must be >= 0, got {frame}")
+        raise ValueError(f'frame must be >= 0, got {frame!r}')
 
-    phase = _TWO_PI * frame / beat_period
-    return base_r + beat_amp * math.sin(phase)
+    phase = 2.0 * math.pi * frame / beat_period
+    result = base_r + beat_amp * math.sin(phase)
+    return max(0.0, result)
 
 
 def beat_scale(
@@ -224,39 +293,60 @@ def beat_scale(
     base_size: float,
     beat_amp: float,
 ) -> float:
-    """Calculate the heart scale factor driven by a beat cycle.
-
-    Uses a sine wave to oscillate the scale around base_size.
+    """Compute the overall scale factor of the heart for the given frame.
 
     Args:
-        frame: Current animation frame (non-negative integer).
-        beat_period: Number of frames per beat cycle (must be > 0).
-        base_size: Base scale factor (must be > 0).
-        beat_amp: Amplitude of scale oscillation (>= 0).
+        frame: Current animation frame (>= 0, not bool).
+        beat_period: Number of frames per heartbeat cycle (> 0, not bool).
+        base_size: Base scale factor (> 0).
+        beat_amp: Fractional amplitude of the heartbeat pulsation (>= 0).
+                  The scale oscillates between base_size*(1-beat_amp) and
+                  base_size*(1+beat_amp).
 
     Returns:
-        Computed scale factor as float.
+        Computed scale factor as float (>= 0).
 
     Raises:
-        ValueError: If base_size <= 0 or beat_period <= 0 or beat_amp < 0.
-        TypeError: If arguments are of incorrect types.
+        TypeError: If *frame* or *beat_period* are bool or non-int.
+        ValueError: If any float argument is NaN / Inf, or *base_size* <= 0,
+                    or *beat_period* <= 0, or *beat_amp* < 0.
     """
-    if not isinstance(frame, int):
-        raise TypeError(f"frame must be int, got {type(frame).__name__}")
-    if not isinstance(beat_period, int):
-        raise TypeError(f"beat_period must be int, got {type(beat_period).__name__}")
-    if not isinstance(base_size, (int, float)):
-        raise TypeError(f"base_size must be numeric, got {type(base_size).__name__}")
-    if not isinstance(beat_amp, (int, float)):
-        raise TypeError(f"beat_amp must be numeric, got {type(beat_amp).__name__}")
+    _require_int(frame, 'frame')
+    _require_int(beat_period, 'beat_period')
+    _require_finite(base_size, 'base_size')
+    _require_finite(beat_amp, 'beat_amp')
     if base_size <= 0:
-        raise ValueError(f"base_size must be > 0, got {base_size}")
+        raise ValueError(f'base_size must be > 0, got {base_size!r}')
     if beat_period <= 0:
-        raise ValueError(f"beat_period must be > 0, got {beat_period}")
+        raise ValueError(f'beat_period must be > 0, got {beat_period!r}')
     if beat_amp < 0:
-        raise ValueError(f"beat_amp must be >= 0, got {beat_amp}")
+        raise ValueError(f'beat_amp must be >= 0, got {beat_amp!r}')
     if frame < 0:
-        raise ValueError(f"frame must be >= 0, got {frame}")
+        raise ValueError(f'frame must be >= 0, got {frame!r}')
 
-    phase = _TWO_PI * frame / beat_period
-    return base_size + beat_amp * math.sin(phase)
+    phase = 2.0 * math.pi * frame / beat_period
+    scale = base_size * (1.0 + beat_amp * math.sin(phase))
+    return max(0.0, scale)
+
+
+# ---------------------------------------------------------------------------
+# Public API list
+# ---------------------------------------------------------------------------
+
+__all__ = [
+    # Constants
+    'HEART_TAG',
+    'TEXT_TAG',
+    'DEFAULT_PALETTE',
+    # Easing
+    'easing_out_cubic',
+    'easing_in_out_sine',
+    # Colour
+    'lerp_color_rich',
+    'glow_color',
+    # Animation
+    'particle_size',
+    'beat_scale',
+    # Re-exported from heart
+    'filled_heart_points_v2',
+]
